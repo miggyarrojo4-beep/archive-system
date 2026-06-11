@@ -2,12 +2,16 @@ import os
 import base64
 import csv
 import re
+import requests
 import pandas as pd
 from datetime import datetime
 import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
-from PyPDF2 import PdfMerger
+try:
+    from pypdf import PdfReader, PdfWriter, PdfMerger
+except ImportError:
+    from PyPDF2 import PdfReader, PdfWriter, PdfMerger
 
 # --------------------------------------------------------
 # 1. PAGE CONFIGURATION & THEME (Dynamic Light/Dark Adaptive)
@@ -268,43 +272,29 @@ if os.path.exists("SCHOOL_LOGO.PNG"):
     with open("SCHOOL_LOGO.PNG", "rb") as f:
         img_data = base64.b64encode(f.read()).decode()
     
-    # Render the backdrop image with an ID for our script to target
     st.markdown(f'<img id="dynamic-backdrop" src="data:image/png;base64,{img_data}" class="backdrop">', unsafe_allow_html=True)
     
-    # Inject an invisible JavaScript watcher to sync logo with Streamlit's internal theme toggle
     components.html(
         """
         <script>
-        // Access the main Streamlit document from the component iframe
         const doc = window.parent.document;
-        
         const syncTheme = () => {
             const backdrop = doc.getElementById('dynamic-backdrop');
             if (!backdrop) return;
-            
-            // Streamlit dynamically updates the background-color and color of the main app
             const textColor = window.getComputedStyle(doc.body).color;
             const rgb = textColor.match(/\\d+/g);
-            
             if (rgb) {
-                // Calculate brightness of text to determine if we are in Dark Mode or Light Mode
                 const luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
                 if (luma > 128) {
-                    // Light Text = Dark Mode App Active
                     backdrop.style.filter = 'invert(1) grayscale(100%)';
                     backdrop.style.opacity = '0.04';
                 } else {
-                    // Dark Text = Light Mode App Active
                     backdrop.style.filter = 'grayscale(100%)';
                     backdrop.style.opacity = '0.07';
                 }
             }
         };
-        
-        // Run immediately on load
         syncTheme();
-        
-        // Watch for any class/style changes Streamlit makes to the DOM when toggling themes
         const observer = new MutationObserver(syncTheme);
         observer.observe(doc.body, { attributes: true, childList: true, subtree: true });
         </script>
@@ -313,19 +303,23 @@ if os.path.exists("SCHOOL_LOGO.PNG"):
     )
 
 # --------------------------------------------------------
-# 2. FILE DIRECTORY SETTINGS
+# 2. FILE DIRECTORY SETTINGS & HYBRID CLOUD LOGIC
 # --------------------------------------------------------
 LOGIN_TOKEN_FILE = ".login_token"
 LOG_FILE = "audit_log.csv"
 TAGS_FILE = "document_tags_metadata.csv"
 LOCAL_REQUESTS_FILE = "student_remote_requests.csv"
 
+# Local Fallback Directory (Used if no Google Sheet is provided)
 ARCHIVE_DIR = r"C:\Users\SSD\Desktop\Form137_manager\scanned_records"
-COMPILED_OUT_DIR = r"C:\Users\user\Desktop\Form137_Manager\compiled_outputs"
+COMPILED_OUT_DIR = "compiled_outputs"
 
 for path_dir in [ARCHIVE_DIR, COMPILED_OUT_DIR]:
     if not os.path.exists(path_dir):
-        os.makedirs(path_dir)
+        try:
+            os.makedirs(path_dir)
+        except Exception:
+            pass
 
 def log_action(username, action, details):
     file_exists = os.path.exists(LOG_FILE)
@@ -434,7 +428,11 @@ def main_app():
     ]
     app_mode = st.sidebar.radio("Navigation Menu", nav_options, label_visibility="collapsed")
     
-    st.sidebar.markdown("<br><br><br>", unsafe_allow_html=True)
+    st.sidebar.markdown("<br>", unsafe_allow_html=True)
+    st.sidebar.markdown("<p style='font-weight:700; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom:5px;' class='theme-text-muted'>CLOUD DATABASE SETUP</p>", unsafe_allow_html=True)
+    gdrive_csv_link = st.sidebar.text_input("Google Sheet Inventory (CSV)", value="", placeholder="Paste CSV Link here...", help="Create a Google Sheet with columns: Filename, Year, Grade, Adviser, Drive_Link. Publish to Web as CSV.")
+    
+    st.sidebar.markdown("<br><br>", unsafe_allow_html=True)
     st.sidebar.markdown("<p style='font-weight:700; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom:5px;' class='theme-text-muted'>ACCOUNT</p>", unsafe_allow_html=True)
     
     st.sidebar.markdown('<div class="btn-danger">', unsafe_allow_html=True)
@@ -446,34 +444,56 @@ def main_app():
         st.rerun()
     st.sidebar.markdown('</div>', unsafe_allow_html=True)
 
-    def get_all_files(root_dir):
+    @st.cache_data(ttl=300)
+    def get_all_files(root_dir, csv_url=""):
         file_list = []
-        if not os.path.exists(root_dir):
-            return file_list
-        for root, dirs, files in os.walk(root_dir):
-            for file in files:
-                if file.lower().endswith(('.pdf', '.jpg', '.jpeg', '.png')):
-                    rel_path = os.path.relpath(root, root_dir)
-                    parts = rel_path.split(os.sep)
+        
+        # 1. Attempt Cloud Fetch First
+        if csv_url.strip().startswith("http"):
+            try:
+                df = pd.read_csv(csv_url.strip())
+                for idx, row in df.iterrows():
+                    fname = str(row.get('Filename', f"Student_Record_{idx}.pdf"))
+                    if fname.lower() == 'nan': fname = f"Student_Record_{idx}.pdf"
+                    link = str(row.get('Drive_Link', ''))
                     
-                    year = parts[0] if len(parts) > 0 and parts[0] != '.' else "Legacy / Old Curriculum"
-                    grade = parts[1] if len(parts) > 1 else "Legacy / Unspecified Grade"
-                    adviser = parts[2] if len(parts) > 2 else "Legacy / Unspecified Adviser"
-                    
-                    if year.lower() in ["", ".", "unknown"]:
-                        year = "Legacy / Old Curriculum"
-                    
-                    file_list.append({
-                        "filename": file,
-                        "full_path": os.path.join(root, file),
-                        "folder_dir": root,
-                        "year": year,
-                        "grade": grade,
-                        "adviser": adviser
-                    })
+                    if link and link.lower() != 'nan':
+                        file_list.append({
+                            "filename": fname,
+                            "full_path": link,
+                            "folder_dir": "Google Drive Cloud",
+                            "year": str(row.get('Year', 'N/A')),
+                            "grade": str(row.get('Grade', 'N/A')),
+                            "adviser": str(row.get('Adviser', 'N/A'))
+                        })
+                if file_list:
+                    return file_list # Successfully loaded from cloud
+            except Exception as e:
+                pass # Fail silently and fallback to local folder
+
+        # 2. Local Fallback (For local machine testing)
+        if os.path.exists(root_dir):
+            for root, dirs, files in os.walk(root_dir):
+                for file in files:
+                    if file.lower().endswith(('.pdf', '.jpg', '.jpeg', '.png')):
+                        rel_path = os.path.relpath(root, root_dir)
+                        parts = rel_path.split(os.sep)
+                        
+                        year = parts[0] if len(parts) > 0 and parts[0] != '.' else "Legacy / Old Curriculum"
+                        grade = parts[1] if len(parts) > 1 else "Legacy / Unspecified Grade"
+                        adviser = parts[2] if len(parts) > 2 else "Legacy / Unspecified Adviser"
+                        
+                        file_list.append({
+                            "filename": file,
+                            "full_path": os.path.join(root, file),
+                            "folder_dir": root,
+                            "year": year,
+                            "grade": grade,
+                            "adviser": adviser
+                        })
         return file_list
 
-    all_files = get_all_files(ARCHIVE_DIR)
+    all_files = get_all_files(ARCHIVE_DIR, gdrive_csv_link)
 
     # --- SYNCHRONIZED COUNTER METRICS ---
     req_c_p, req_c_w, req_c_r = 0, 0, 0
@@ -500,7 +520,7 @@ def main_app():
 
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     with col_m1:
-        st.markdown(f"<div class='metric-box total'><div class='metric-val'>{len(all_files)}</div><div class='metric-lbl'>Total Scanned Records</div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-box total'><div class='metric-val'>{len(all_files)}</div><div class='metric-lbl'>Total Records Indexed</div></div>", unsafe_allow_html=True)
     with col_m2:
         st.markdown(f"<div class='metric-box pending'><div class='metric-val'>{req_c_p}</div><div class='metric-lbl'>Pending Requests</div></div>", unsafe_allow_html=True)
     with col_m3:
@@ -572,18 +592,18 @@ def main_app():
         if not os.path.exists(LOCAL_REQUESTS_FILE):
             st.info("No records cached. Click 'Sync Cloud Requests' above to fetch items.")
         else:
-            requests = []
+            requests_data = []
             try:
                 with open(LOCAL_REQUESTS_FILE, mode="r", encoding="utf-8") as f:
                     reader = csv.DictReader(f)
-                    requests = list(reader)
+                    requests_data = list(reader)
             except Exception:
-                requests = []
+                requests_data = []
                 
-            if not requests: 
+            if not requests_data: 
                 st.info("No current requests found.")
             else:
-                for idx, req in enumerate(reversed(requests)):
+                for idx, req in enumerate(reversed(requests_data)):
                     if not req.get("Student_Name") or not req.get("Request_ID"):
                         continue
                         
@@ -609,32 +629,32 @@ def main_app():
                     """, unsafe_allow_html=True)
                     
                     c_act1, c_act2, c_act3, c_act4 = st.columns([1.5, 1.5, 1.5, 4.5])
-                    real_idx = len(requests) - 1 - idx
+                    real_idx = len(requests_data) - 1 - idx
                     
                     with c_act1:
                         if st.button("Process", key=f"p_{req['Request_ID']}_{idx}", use_container_width=True):
-                            requests[real_idx]["Status"] = "Processing"
+                            requests_data[real_idx]["Status"] = "Processing"
                             with open(LOCAL_REQUESTS_FILE, mode="w", newline="", encoding="utf-8") as fw:
                                 writer = csv.writer(fw)
                                 writer.writerow(["Request_ID", "Timestamp", "Student_Name", "Contact_Number", "Adviser", "School_Year", "Purpose", "Status"])
-                                for r in requests: writer.writerow(list(r.values()))
+                                for r in requests_data: writer.writerow(list(r.values()))
                             st.rerun()
                     with c_act2:
                         if st.button("Release", key=f"r_{req['Request_ID']}_{idx}", use_container_width=True):
-                            requests[real_idx]["Status"] = "Released"
+                            requests_data[real_idx]["Status"] = "Released"
                             with open(LOCAL_REQUESTS_FILE, mode="w", newline="", encoding="utf-8") as fw:
                                 writer = csv.writer(fw)
                                 writer.writerow(["Request_ID", "Timestamp", "Student_Name", "Contact_Number", "Adviser", "School_Year", "Purpose", "Status"])
-                                for r in requests: writer.writerow(list(r.values()))
+                                for r in requests_data: writer.writerow(list(r.values()))
                             st.rerun()
                     with c_act3:
                         st.markdown('<div class="btn-danger">', unsafe_allow_html=True)
                         if st.button("Remove", key=f"del_{req['Request_ID']}_{idx}", use_container_width=True):
-                            requests.pop(real_idx)
+                            requests_data.pop(real_idx)
                             with open(LOCAL_REQUESTS_FILE, mode="w", newline="", encoding="utf-8") as fw:
                                 writer = csv.writer(fw)
                                 writer.writerow(["Request_ID", "Timestamp", "Student_Name", "Contact_Number", "Adviser", "School_Year", "Purpose", "Status"])
-                                for r in requests: writer.writerow(list(r.values()))
+                                for r in requests_data: writer.writerow(list(r.values()))
                             st.rerun()
                         st.markdown('</div>', unsafe_allow_html=True)
                     
@@ -645,18 +665,6 @@ def main_app():
         st.markdown("<h3 style='margin:0; font-weight:700;' class='theme-text'>Records Archive Search Engine</h3>", unsafe_allow_html=True)
         st.markdown("<p class='theme-text-muted'>Locate student records, preview documents, and update verification tags instantly.</p>", unsafe_allow_html=True)
         
-        console_source = st.selectbox(
-            "Choose Document Storage Source:",
-            ["Local System Server Directory Workspace", "Google Drive Live Integration URL Network"]
-        )
-        
-        gdrive_search_url = ""
-        if "Google Drive" in console_source:
-            gdrive_search_url = st.text_input(
-                "Paste Exact Google Drive File Link:", 
-                placeholder="https://drive.google.com/file/d/your-file-id/view"
-            )
-
         search_query = st.text_input("Search student name or filename...", placeholder="Type student name here (e.g. DELA CRUZ, JUAN)")
         
         col_f1, col_f2, col_f3 = st.columns(3)
@@ -676,7 +684,7 @@ def main_app():
             filtered = [f for f in all_files if search_query.lower() in f["filename"].lower()]
             if search_query not in st.session_state.search_history:
                 st.session_state.search_history.append(search_query)
-                log_action("admin", "SEARCH", f"Searched: '{search_query}' using source: {console_source}")
+                log_action("admin", "SEARCH", f"Searched: '{search_query}'")
                 
             if selected_year != "All Records":
                 filtered = [f for f in filtered if f["year"] == selected_year]
@@ -751,13 +759,11 @@ def main_app():
                 gdrive_fetch_error = False
                 drive_id = ""
                 
-                if "Google Drive" in console_source and gdrive_search_url.strip():
-                    match = re.search(r'(?:/d/|id=)([\w-]+)', gdrive_search_url)
+                if path_key.startswith("http"):
+                    match = re.search(r'(?:/d/|id=)([\w-]+)', path_key)
                     drive_id = match.group(1) if match else ""
-                    
                     if drive_id:
                         try:
-                            import requests
                             direct_dl_url = f"https://drive.google.com/uc?export=download&id={drive_id}"
                             res = requests.get(direct_dl_url)
                             if res.status_code == 200 and 'text/html' not in res.headers.get('Content-Type', ''):
@@ -786,7 +792,7 @@ def main_app():
                 
                 if (view_clicked or st.session_state.get(f"keep_view_{path_key}", False)):
                     if drive_id and gdrive_fetch_error:
-                        st.info("File is too large for direct preview. Click 'Open in Drive' to view.")
+                        st.info("File is too large for direct preview within the app. Click 'Open in Drive' to view it safely.")
                     elif binary_data:
                         st.session_state[f"keep_view_{path_key}"] = True
                         st.markdown("<div class='view-frame'>", unsafe_allow_html=True)
@@ -796,7 +802,10 @@ def main_app():
                             pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="650" type="application/pdf"></iframe>'
                             st.markdown(pdf_display, unsafe_allow_html=True)
                         else:
-                            st.image(binary_data, use_container_width=True)
+                            try:
+                                st.image(binary_data, use_container_width=True)
+                            except Exception:
+                                st.error("Image format not supported for direct preview.")
                         
                         if st.button("Close File Preview", key=f"close_{path_key}"):
                             st.session_state[f"keep_view_{path_key}"] = False
@@ -806,11 +815,6 @@ def main_app():
 
     # --- MODE 2: MERGE PAGES ---
     elif app_mode == "MERGE PAGES":
-        try:
-            from pypdf import PdfReader, PdfWriter
-        except ImportError:
-            from PyPDF2 import PdfReader, PdfWriter
-
         st.markdown("<h3 style='margin:0; font-weight:700;' class='theme-text'>Multi-Page Compilation Console</h3>", unsafe_allow_html=True)
         st.markdown("<p class='theme-text-muted'>Merge multiple disconnected scan pages into a single, comprehensive student document safely.</p>", unsafe_allow_html=True)
         
@@ -843,6 +847,20 @@ def main_app():
                         doc = file_options[key]
                         filepath = doc['full_path']
                         
+                        # Handle Google Drive links for merging
+                        if filepath.startswith("http"):
+                            match = re.search(r'(?:/d/|id=)([\w-]+)', filepath)
+                            d_id = match.group(1) if match else ""
+                            if d_id:
+                                dl_url = f"https://drive.google.com/uc?export=download&id={d_id}"
+                                res = requests.get(dl_url)
+                                if res.status_code == 200:
+                                    temp_pdf = f"temp_cloud_file_{d_id}.pdf"
+                                    with open(temp_pdf, "wb") as tf:
+                                        tf.write(res.content)
+                                    filepath = temp_pdf
+                                    temp_files_to_clean.append(filepath)
+
                         if filepath.lower().endswith(('.png', '.jpg', '.jpeg')):
                             image = Image.open(filepath)
                             pdf_path = filepath.rsplit('.', 1)[0] + "_temp_conv.pdf"
@@ -866,14 +884,14 @@ def main_app():
                             os.remove(temp_file)
                             
                     log_action("admin", "MERGE_DOCUMENTS", f"Merged pages into single file: {output_filename}")
-                    st.success(f"Compilation finished! Combined document safely written to outputs folder: `{output_path}`.")
+                    st.success(f"Compilation finished! Combined document safely written to outputs folder.")
                     
                     st.session_state['compiled_pdf_path'] = output_path
                     st.session_state['compiled_pdf_filename'] = output_filename
                     st.session_state['show_preview'] = True
                     
                 except Exception as e:
-                    st.error(f"Error compiling files: {e}")
+                    st.error(f"Error compiling files: {e}. If files are too large, try downloading manually from Drive.")
 
         if 'compiled_pdf_path' in st.session_state and os.path.exists(st.session_state['compiled_pdf_path']):
             current_path = st.session_state['compiled_pdf_path']
