@@ -1102,17 +1102,6 @@ def main_app():
             st.info("No system activity logged yet.")
 
 def render_footer():
-    deped_logo_html = ""
-    logo_path = "DEPED_QUEZON_LOGO.PNG"
-    
-    # Check if the logo file exists to encode it
-    if os.path.exists(logo_path):
-        with open(logo_path, "rb") as f:
-            logo_data = base64.b64encode(f.read()).decode()
-            
-        # Removed absolute positioning, set a clean height, and added a bottom margin
-        deped_logo_html = f'<img src="data:image/png;base64,{logo_data}" style="height: 55px; object-fit: contain; margin-bottom: 8px;" alt="DepEd Quezon Logo">'
-
     st.markdown(f"""
         <style>
             .footer {{
@@ -1128,13 +1117,11 @@ def render_footer():
                 border-top: 1px solid var(--metric-border);
                 z-index: 1000;
                 display: flex;
-                flex-direction: column; /* This stacks the logo and text vertically */
-                align-items: center;    /* Centers them horizontally */
+                align-items: center;    
                 justify-content: center;
             }}
         </style>
         <div class="footer">
-            {deped_logo_html}
             <p style="margin: 0; z-index: 1001; position: relative;">CNHS Form 137 Archive System © 2026 | Calauag National High School | Records Management Office</p>
         </div>
     """, unsafe_allow_html=True)
